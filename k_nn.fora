@@ -1,0 +1,323 @@
+/* 
+k_nn :: [Tuple] -> Int -> [Tuple,Float64]
+
+k_nn takes a point list (of same dimension) and an integer 
+k and outputs a vector of the k nearest neighbors, along with
+distances, using a k-d tree approach
+
+based on the Python package kdtree by Stefan Koegl 
+*/
+
+// Node is a binary node with an additional axis variable,
+// indicating the axis of the splitting plane that the
+// node represents
+
+let Node = class {
+    member location;
+    member left_child;
+    member right_child;
+    member axis;
+
+    // children returns the children as (Node, position)
+    // as an iterator, where position = 0 for left child 
+    // and position = 1 for right child
+    children: fun() {
+        if (self.left_child is not nothing) yield (self.left_child, 0);
+        if (self.right_child is not nothing) yield (self.right_child, 1)
+    };
+    
+    // gets the position of the child, 0 for left and 1 for right
+    get_child_pos: fun(self, child) {
+        for (x, pos) in self.children() { if (child == x) return pos}
+    };
+    
+    // prints the location and axis when String(node_instance) is called
+    convert(String) {
+        "Location: " + String(self.location) + " Axis: " String(self.axis)
+    };
+    
+    // Define leaf property
+    is_leaf: if (self.left_child == nothing & self.right_child == nothing) return true else return false;
+    
+    // height goes down the (sub)tree and determines height of its longest branch
+    // discounting leaves (which are empty by construction)
+    height: fun() { max([x for x in self.height_iter()]) };
+    height_iter: fun() {
+        if (self.location == nothing) yield 0;
+        // create a vector of all the heights in the tree
+        let min_height = 1;
+        for (child, pos) in self.children() {
+            yield max([min_height] + [max([x for x in child.height_iter()]) + 1]);
+        };
+    };
+
+    // a tree is balanced if the height of its two subtrees
+    // differs by at most 1
+    is_balanced: fun() { 
+        let left_height = (self.left_child).height();
+        let right_height = (self.right_child).height();
+        if (math.abs(left_height - right_height) <= 1) return true
+        else return false;
+    };
+    
+    // Sets one of the node's children; index 0 is left, 1 is right
+    // what is the method for updating a member of an object? The
+    // best I can do right now is to create a new Node object with the
+    // child
+    /*
+    set_child = fun(index, child) {
+        if (index == 0) Node(location, child, right_child, axis)
+        else Node(location, left_child, child, axis)
+    };
+    */
+    
+    // given a dictionary, items returns a vector of the 
+    // form [ [key1,value1], [key2, value2], ...]
+    items: fun(dictionary) { iter.toVector( iter.zip(dictionary.keys(),dictionary.values()) ) };
+    
+    // the squared Euclidean distance    
+    dist: fun(point) {
+        point = iter.toVector(iter.zipWithIndex(point));
+        return sum(point.apply(fun(x) {x[1] - self.location[x[0]]}).apply(fun(x){x**2}));
+    };
+
+    // Returns the k nearest neighbors of a given point along 
+    // with their locations, where point is the given point,
+    // k is the number of closest points, and distance is a 
+    // given distance function between two points
+    search_knn: fun(point, k, dist=0) {
+        let prev = nothing;
+        let current = self;
+
+        // sets the default distance in case dist is nothing
+        let get_dist = fun(node) { node.dist(point) };
+        // if (dist == nothing) get_dist = fun(node) { node.dist(point) }
+        //     else get_dist = fun(node, point) { dist(node.location,point) };
+        
+        // parents[x] == y should be read as: "the parent of node x is y"
+        let parents = {current : nothing};
+        
+        // go down the tree until leaf, while saving parents
+        while (not current.is_leaf) {
+            if (point[current.axis] < current.location[current.axis]) {
+                // left side
+                parents = parents.addPair(current.left_child, current);
+                prev = current;
+                current = current.left_child;
+            }
+            else {
+                // right side
+                parents = parents.addPair(current.right_child, current);
+                prev = current;
+                current = current.right_child;
+            }
+        };
+        
+        if (prev == nothing) throw "The tree is empty.";
+
+        let examined = [];
+        let results = {:};
+
+        // Go up the tree, looking for better solutions
+        current = prev;
+        let bestNode = nothing;
+        let bestDist = nothing;
+
+        while (parents[current] != nothing) { // stop at top node
+            // search node and update results
+            (results, examined) = current.search_node(point, k, results, examined, get_dist);
+            current = parents[current];
+        };
+
+        // return the k nearest neighbors according to their distance        
+        let neighbors = sorting.sort(items(results), fun(x,y) { x[1] < y[1] });
+        
+        // reformat and reapply the squareroot
+        neighbors = neighbors.apply( fun((node,dist)) { [node.location,math.sqrt(dist)] } );
+        
+        return neighbors;
+    };
+    
+    // search_node returns a new results list by reviewing all nodes
+    // and subnodes which are potentially closer than the existing results
+    search_node: fun(point, k, results, examined, get_dist) {
+        examined = examined + [self];
+        
+        let bestNode = nothing;
+        let bestDist = nothing;
+        
+        // get current best
+        if (results == {:}) {
+            bestNode = nothing;
+            bestDist = Float64(math.inf);
+        }
+        else {
+            (bestNode, bestDist) = sorting.sort(items(results), fun(x,y) { x[1] < y[1] } )[0]
+        };
+        
+        // If the current node is closer than the current best, then it
+        // becomes the current best.
+        let nodeDist = get_dist(self);
+        
+        // the first time around, just add the current node
+        if (results == {:}) results = results.addPair(self,nodeDist);
+        
+        // starting from the -farthest- current neighbor, check if 
+        // the current node is closer; if so, replace the current node
+        let sorted_results = sorting.sort(items(results), fun(x,y) { x[1] > y[1] });
+        for (bestNode, bestDist) in sorted_results {    
+            if (nodeDist < bestDist) {
+                if (size(results) == k) {
+                    // remove the current node
+                    results = results.remove(bestNode); // BROKEN?
+                };
+                results = results.addPair(self, nodeDist);
+                break; // exit out of for loop once we add the node
+            }
+            else {
+                // if we're equal to the current best, add it, regardless of k
+                if (nodeDist == bestDist and self not in examined) {
+                    results = results.addPair(self, nodeDist);
+                    break; // exit once we add the node
+                }
+                else {
+                    // if we don't have k results yet, add it anyway
+                    if (size(results) < k) results = results.addPair(self, nodeDist);
+                    break; // exit once we add the node
+                };
+            };
+        };
+
+        // get new sorted results, again starting from the -farthest-
+        sorted_results = sorting.sort(items(results), fun(x,y) { x[1] > y[1] });        
+        
+        // Check whether there could be any points on the other side of the
+        // splitting plane that are closer to the search point than the current
+        // best; if so, update results by searching that side of the tree
+        for (bestNode, bestDist) in sorted_results {
+            for (child, pos) in self.children() {
+                if (child in examined or child.location is nothing) {
+                    ; // continue to to next child
+                }
+                else {
+                    examined = examined + [child];
+                    
+                    // Since the hyperplanes are all axis-aligned this is implemented
+                    // as a simple comparison to see whether the difference between the
+                    // splitting coordinate of the search point and current node is less
+                    // than the distance (overall coordinates) from the search point to
+                    // the current best.
+    
+                    // dictionary for (compare,combine) logic
+                    let COMPARE_CHILD = {
+                        // if left child, then in that axis it is "below" the splitting plane; we compute the axis-specific "best radius" around the point (point[self.axis] - bestDist) and see if the child is within the radius
+                        0: (fun(x,y) {x <= y}, fun(x,y) {x - y}), 
+                        // if right child, then in that axis it is "above" the splitting plane; we compute the axis-specific "best radius" around the point (point[self.axis] + bestDist) and see if the child is within the radius
+                        1: (fun(x,y) {x >= y}, fun(x,y) {x + y})
+                    };
+                    let (compare, combine) = COMPARE_CHILD[pos];
+                    
+                    let nodePoint = self.location[self.axis];
+                    let pointPlusDist = combine(point[self.axis], bestDist);
+                    let lineIntersects = compare(pointPlusDist, nodePoint);
+    
+                    // If the hypersphere crosses the plane, there could be nearer
+                    // points on the other side of the plane, so the algorithm must move
+                    // down the other branch of the tree from the current node looking
+                    // for closer points, following the same recursive process as the
+                    // entire search.
+    
+                    if (lineIntersects) (results, examined) = child.search_node(point, k, results, examined, get_dist);
+                };
+            };
+        };
+        return (results, examined); 
+    };
+    
+    // search_nn is just search_knn with k = 1
+    search_nn: fun(point) { search_knn(point, 1) };
+};
+
+/* 
+Note: I couldn't figure out how to define a prettyprint 
+function as a method of the Node class, i.e. as something 
+of the form convert(String), so I put it outside 
+*/
+
+// prettyprint all members of the tree
+let leftright = fun(x) { if (x is 0) return "L" else return "R" };
+let printAll = fun(node, depth=1) {
+    let ret = "";
+    ret = "Location: " + String(node.location) + ", Axis: " + String(node.axis) + "\n";
+    for (child,pos) in node.children() {
+        ret = ret + "\t" * depth + "(" + leftright(pos) + ") " + printAll(child,depth+1);
+    };
+    return ret;
+};
+
+// creates the kd tree from a given point list, assuming that 
+// the dimension of all vectors in pointList is constant
+let create_kdtree = fun(pointList,depth=0) {    
+    // Define leaf condition
+    if (size(pointList) == 0) return createInstance(Node, location: nothing, left_child: nothing, right_child: nothing, axis: nothing);
+    
+    // Define dimension
+    let k = size(pointList[0]);
+    
+    // Select axis based on depth so that axis cycles through all valid values
+    let axis = depth % k;
+    
+    // Sort point list and choose median as pivot element
+    let pointList_sorted = sorting.sort(pointList, fun(x,y) { x[axis] < y[axis] });
+    let median = size(pointList_sorted) / 2;
+    pointList_sorted;
+
+    // Create first node and construct subtrees
+    let tree = createInstance(Node, location: pointList_sorted[median], 
+        left_child: create_kdtree(pointList_sorted[,median],depth+1), 
+        right_child: create_kdtree(pointList_sorted[median+1,],depth+1),
+        axis: axis
+        );
+    
+    return tree
+};
+
+// rebalance returns the root of a new, rebalanced tree
+let rebalance = fun(node) { 
+        return create_kdtree([x.location for x in [node.location, node.left_child, node.right_child]])
+};
+
+// wrappers for the above functions
+let k_nn = fun(point, pointList, k) { create_kdtree(pointList).search_knn(point,k) };
+let nn = fun(point, pointList) { k_nn(point, pointList, 1) };
+
+// TEST MODULE
+// Construct test list
+let gaussian_samples_2d = fun(nSamples, mu:=(4,4), sd:=1.0, seed) {
+    let tr = [];
+    let rng = iterator(math.random.Normal(0, sd, seed));
+    for _ in sequence(nSamples) {
+        tr = tr :: (mu[0] + (pull rng), mu[1] + (pull rng))
+    };
+    tr
+};
+
+let seed = 12990213;
+let pointList = gaussian_samples_2d(100, seed); 
+let point = (5,6);
+let tree = create_kdtree(pointList);
+printAll(tree);
+"Is leaf? " + String(tree.is_leaf);
+"Height: " + String(tree.height());
+"Is balanced? " + String(tree.is_balanced());
+"First nearest neighbor: " + String(tree.search_nn(point));
+let neighbors = k_nn(point, pointList, 5);
+"All nearest neighbors: ";l
+neighbors;
+
+let point_to_plot = [point];
+let list_to_plot = pointList;
+let neighbors_to_plot = neighbors.apply( fun(x){ iter.toTuple(x[0]) });
+
+scatterPlot(point_to_plot) + scatterPlot(list_to_plot) + scatterPlot(neighbors_to_plot);
+"Black is the given point, red indicates the nearest neighbors";
